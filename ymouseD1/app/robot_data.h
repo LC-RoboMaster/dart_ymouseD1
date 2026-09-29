@@ -1,0 +1,4 @@
+#ifndef YMOUESD1_ROBOT_DATA_H
+#define YMOUESD1_ROBOT_DATA_H
+
+#endif /* YMOUESD1_ROBOT_DATA_H */

@@ -1,0 +1,9 @@
+C:\ST\STM32CubeCLT_1.21.0\CMake\bin\cmake.exe -DCMAKE_BUILD_TYPE=Debug --preset Debug -S E:\1code\ymouseD1\ymouseD1 -B E:\1code\ymouseD1\ymouseD1\build\Debug
+Preset CMake variables:
+
+  CMAKE_TOOLCHAIN_FILE:FILEPATH="E:/1code/ymouseD1/ymouseD1/cmake/gcc-arm-none-eabi.cmake"
+
+Build type: Debug
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: E:/1code/ymouseD1/ymouseD1/build/Debug
