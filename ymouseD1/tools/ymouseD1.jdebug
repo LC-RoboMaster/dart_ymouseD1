@@ -1,0 +1,88 @@
+/*********************************************************************
+*                 (c) SEGGER Microcontroller GmbH                    *
+*                      The Embedded Experts                          *
+*                         www.segger.com                             *
+**********************************************************************
+
+File          : ymouseD1.jdebug
+Purpose       : Ozone 调试工程 —— ymouseD1 / STM32F401CCU6
+Ozone Version : V3.40
+
+用法:
+  1. 直接双击本文件,或 Ozone 里 File -> Open 选它;
+  2. 或命令行: "C:\Program Files\SEGGER\Ozone\Ozone.exe" tools\ymouseD1.jdebug
+
+需要先编译出 build/Debug/ymouseD1.elf (cmake --build --preset Debug)。
+*/
+
+/*********************************************************************
+*
+*       OnProjectLoad
+*
+* Function description
+*   Project load routine. Required.
+*
+**********************************************************************
+*/
+void OnProjectLoad (void) {
+  //
+  // 目标器件与调试接口。
+  // 注意:J-Link 器件库里的名字带封装后缀,STM32F401CCU6(UFQFPN48)
+  //       对应 STM32F401CCU,不是 STM32F401CC。
+  //
+  Project.SetDevice ("STM32F401CCU");
+  Project.SetTargetIF ("SWD");
+  Project.SetTIFSpeed ("4 MHz");
+
+  //
+  // J-Link 走 USB。只有接了多台 J-Link 时才需要指定序列号:
+  //   Project.SetHostIF ("USB", "602710315");
+  //
+
+  //
+  // Cortex-M4F 内核寄存器视图(Ozone 自带)
+  //
+  Project.AddSvdFile ("$(InstallDir)/Config/CPU/Cortex-M4F.svd");
+
+  //
+  // STM32F401 外设寄存器视图。
+  // Ozone 自己只带 STM32F103xx / STM32F407IG,这里用 STM32CubeCLT 自带的 ST SVD。
+  // 装了别的版本 CubeCLT 的话,把下面这行路径改成实际位置即可。
+  //
+  Project.AddSvdFile ("C:/ST/STM32CubeCLT_1.21.0/STMicroelectronics_CMSIS_SVD/STM32F401.svd");
+
+  //
+  // FreeRTOS 感知:可以直接看任务列表、各任务状态和栈使用率
+  //
+  Project.SetOSPlugin ("FreeRTOSPlugin_CM4");
+
+  //
+  // 打开的固件(相对本文件所在目录,即 tools/ 的上一级)
+  //
+  File.Open ("$(ProjectDir)/../build/Debug/ymouseD1.elf");
+}
+
+/*********************************************************************
+*
+*       OnStartupComplete
+*
+* Function description
+*   Called when program execution has reached/passed
+*   the startup completion point. Optional.
+*
+**********************************************************************
+*/
+//void OnStartupComplete (void) {
+//}
+
+/*********************************************************************
+*
+*       TargetReset
+*
+* Function description
+*   Replaces the default target device reset routine. Optional.
+*
+**********************************************************************
+*/
+//void TargetReset (void) {
+//}
