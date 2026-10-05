@@ -4,5 +4,6 @@
 
 #ifndef YMOUSED1_DART_MOTOR_H
 #define YMOUSED1_DART_MOTOR_H
-
+void dart_init();
+void dart_motor_task();
 #endif //YMOUSED1_DART_MOTOR_H

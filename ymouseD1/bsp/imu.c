@@ -1,185 +1,271 @@
-//
-// Created by 13466 on 2026/9/25.
-//
-// 维特智能 JY901S 姿态模块驱动(USART1:PB6=TX / PB7=RX,模块 TXD 接 PB7)
-//
-// 模块主动推送数据帧,波特率 9600(与 CubeMX 中 USART1 配置一致):
-//  - 帧长 11 字节:0x55 | 类型 | 8×数据 | 校验和(前 10 字节之和的低 8 位)
-//  - 类型:0x51 加速度+温度,0x52 角速度+温度,0x53 角度(数据末字段为版本,忽略)
-//  - 换算:加速度 = raw/32768×16g,角速度 = raw/32768×2000°/s,
-//          角度 = raw/32768×180°,温度 = raw/100℃
-//  - 若在上位机改过模块量程/波特率/输出内容,需同步修改下方换算系数与 CubeMX。
-//
-// 可靠性:
-//  - 逐字节中断接收 + 状态机解析,失步自动从下一个 0x55 重新同步;
-//  - 帧流超时(200ms 无有效帧)置离线;接收被错误中止时自动重新挂起。
-#include "cmsis_os2.h"
-#include "main.h"
+/**
+  ******************************************************************************
+  * @file    imu.c
+  * @brief   姿态传感器适配层
+  *
+  *          硬件上两种陀螺仪二选一(不会同时使用):
+  *            - LSM6DSV16XTR   IIC1 0x6A / 0x6B   (bsp/imu_lsm6dsv16x.c)
+  *            - 维特智能 JY901S IIC1 0x50          (bsp/imu_jy901s.c)
+  *
+  *          本文件负责:选器件、把原始值换算成工程单位、跑采集任务。
+  *          应用层只读 g_imu,换器件不用改应用代码。
+  ******************************************************************************
+  */
+
 #include "imu.h"
-#include "usart.h"
 
-/* 数据帧定义 */
-#define JY901S_FRAME_HEAD   0x55U
-#define JY901S_FRAME_LEN    11U
-#define JY901S_PKT_ACC      0x51U
-#define JY901S_PKT_GYRO     0x52U
-#define JY901S_PKT_ANGLE    0x53U
+#include <stddef.h>
 
-/* 满量程换算系数(模块默认量程) */
-#define JY901S_ACC_FS_G     16.0f
-#define JY901S_GYRO_FS      2000.0f
-#define JY901S_ANGLE_FS     180.0f
-#define JY901S_TEMP_SCALE   100.0f
+#include "main.h"
+#include "i2c.h"
+#include "cmsis_os2.h"
 
-/* 帧流超时:超过该时长无有效帧判离线 */
-#define IMU_FRAME_TIMEOUT_MS 200U
-/* 在线状态检查周期 */
-#define IMU_TASK_PERIOD_MS   100U
+#include "imu_lsm6dsv16x.h"
+#include "imu_jy901s.h"
 
+/* 统一数据,供其它任务读取 */
 imu_data_t g_imu;
 
-static uint8_t s_rx_byte;                       /* 单字节接收缓冲 */
-static uint8_t s_frame[JY901S_FRAME_LEN];       /* 组帧缓冲 */
-static uint8_t s_frame_idx;                     /* 当前组帧位置 */
-static uint32_t s_last_frame_tick;              /* 最近一帧有效数据的时刻 */
+/* 诊断信息,供排查通信问题 */
+imu_diag_t g_imu_diag;
 
-static void jy901s_parse_byte(uint8_t byte);
-static void jy901s_apply_frame(void);
+/* 当前生效的后端 */
+static const imu_backend_t *s_active = NULL;
 
-/**
- * @brief  启动串口接收
- * @retval 0:成功 -1:失败
- */
-int imu_init(void)
+/* 本次启动是否已做过总线扫描(避免一直失败时反复扫总线) */
+static uint8_t s_scan_done = 0U;
+
+/* ==========================================================================
+ * 内部函数
+ * ========================================================================== */
+
+static void imu_clear_data(void)
 {
-    if (HAL_UART_Receive_IT(&huart1, &s_rx_byte, 1U) != HAL_OK) {
-        return -1;
-    }
-    return 0;
+  uint8_t i;
+
+  for (i = 0U; i < 3U; i++) {
+    g_imu.gyro_raw[i] = 0;
+    g_imu.gyro_dps[i] = 0.0f;
+    g_imu.gyro_bias_dps[i] = 0.0f;
+    g_imu.accel_raw[i] = 0;
+    g_imu.accel_g[i] = 0.0f;
+  }
+  g_imu.roll_deg = 0.0f;
+  g_imu.pitch_deg = 0.0f;
+  g_imu.yaw_deg = 0.0f;
+  g_imu.temp_c = 0.0f;
 }
 
 /**
- * @brief  校验通过的帧写入 g_imu(在串口中断上下文执行)
+ * @brief 上电零偏标定:采集 samples 帧原始角速度求平均
+ * @note  与具体器件无关,标定期间模块必须静止不动
+ * @retval 0 成功, -1 失败
  */
-static void jy901s_apply_frame(void)
+static int imu_calibrate_gyro(uint16_t samples)
 {
-    int16_t v[4];
+  float sum[3] = { 0.0f, 0.0f, 0.0f };
+  imu_sample_t s;
+  uint16_t n = 0U;
+  uint16_t i;
+  uint8_t k;
 
-    /* 每包含 3 轴数据 + 1 个附加字段(温度或版本),低字节在前 */
-    v[0] = (int16_t)(s_frame[2] | (s_frame[3] << 8));
-    v[1] = (int16_t)(s_frame[4] | (s_frame[5] << 8));
-    v[2] = (int16_t)(s_frame[6] | (s_frame[7] << 8));
-    v[3] = (int16_t)(s_frame[8] | (s_frame[9] << 8));
+  if (s_active == NULL) {
+    return -1;
+  }
+  if (samples == 0U) {
+    samples = IMU_CALIB_SAMPLES;
+  }
 
-    switch (s_frame[1]) {
-    case JY901S_PKT_ACC:
-        g_imu.accel_x_raw = v[0];
-        g_imu.accel_y_raw = v[1];
-        g_imu.accel_z_raw = v[2];
-        for (uint8_t i = 0; i < 3; i++) {
-            g_imu.acc_g[i] = (float)v[i] / 32768.0f * JY901S_ACC_FS_G;
-        }
-        g_imu.temperature_raw = v[3];
-        g_imu.temp_c = (float)v[3] / JY901S_TEMP_SCALE;
+  for (i = 0U; i < samples; i++) {
+    if (s_active->wait_ready != NULL) {
+      if (s_active->wait_ready(IMU_I2C_TIMEOUT_MS) != 0) {
+        continue;
+      }
+    }
+    if (s_active->read(&s) != 0) {
+      continue;
+    }
+    for (k = 0U; k < 3U; k++) {
+      sum[k] += (float)s.gyro_raw[k] * s_active->gyro_lsb_dps;
+    }
+    n++;
+  }
+
+  if (n == 0U) {
+    return -1;
+  }
+  for (k = 0U; k < 3U; k++) {
+    g_imu.gyro_bias_dps[k] = sum[k] / (float)n;
+  }
+  return 0;
+}
+
+/* ==========================================================================
+ * 对外接口
+ * ========================================================================== */
+
+void Imu_RecoverBus(void)
+{
+  /* HAL 的 I2C 卡住后不会自愈,必须整个复位重来 */
+  (void)HAL_I2C_DeInit(&hi2c1);
+  MX_I2C1_Init();
+
+  /* 顺手清掉"总线忙"的残留记录,方便区分恢复前后的失败 */
+  g_imu_diag.last_status = 0U;
+}
+
+uint8_t Imu_ScanBus(void)
+{
+  uint8_t a;
+
+  g_imu_diag.count = 0U;
+  for (a = 1U; a < 128U; a++) {
+    /* 只发地址等 ACK,不读写寄存器 */
+    if (HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)((uint16_t)a << 1), 1U, 5U) == HAL_OK) {
+      if (g_imu_diag.count < IMU_SCAN_MAX) {
+        g_imu_diag.addr[g_imu_diag.count] = a;
+      }
+      g_imu_diag.count++;
+    }
+  }
+  return g_imu_diag.count;
+}
+
+int Imu_Init(void)
+{
+  const imu_backend_t *b = NULL;
+
+  s_active = NULL;
+  g_imu.online = 0U;
+  g_imu.source = NULL;
+  g_imu.has_angle = 0U;
+
+#if (IMU_SENSOR_SEL == IMU_SENSOR_LSM6DSV16XTR)
+  if (imu_backend_lsm6dsv16x.init() == 0) {
+    b = &imu_backend_lsm6dsv16x;
+  }
+#elif (IMU_SENSOR_SEL == IMU_SENSOR_JY901S)
+  if (imu_backend_jy901s.init() == 0) {
+    b = &imu_backend_jy901s;
+  }
+#else /* IMU_SENSOR_AUTO:按顺序探测,谁先应答就用谁 */
+  {
+    static const imu_backend_t *const cand[2] = {
+      &imu_backend_lsm6dsv16x,
+      &imu_backend_jy901s,
+    };
+    uint8_t i;
+
+    for (i = 0U; i < 2U; i++) {
+      if (cand[i]->init() == 0) {
+        b = cand[i];
         break;
-    case JY901S_PKT_GYRO:
-        g_imu.gyro_x_raw = v[0];
-        g_imu.gyro_y_raw = v[1];
-        g_imu.gyro_z_raw = v[2];
-        for (uint8_t i = 0; i < 3; i++) {
-            g_imu.gyro_dps[i] = (float)v[i] / 32768.0f * JY901S_GYRO_FS;
-        }
-        g_imu.temperature_raw = v[3];
-        g_imu.temp_c = (float)v[3] / JY901S_TEMP_SCALE;
-        break;
-    case JY901S_PKT_ANGLE:
-        g_imu.angle_x_raw = v[0];
-        g_imu.angle_y_raw = v[1];
-        g_imu.angle_z_raw = v[2];
-        g_imu.roll_deg = (float)v[0] / 32768.0f * JY901S_ANGLE_FS;
-        g_imu.pitch_deg = (float)v[1] / 32768.0f * JY901S_ANGLE_FS;
-        g_imu.yaw_deg = (float)v[2] / 32768.0f * JY901S_ANGLE_FS;
-        break;
-    default:
-        return;
+      }
     }
+  }
+#endif
 
-    g_imu.online = 1U;
-    s_last_frame_tick = HAL_GetTick();
+  if (b == NULL) {
+    return -1;
+  }
+
+  s_active = b;
+  imu_clear_data();
+  g_imu.err_cnt = 0U;
+  g_imu.source = b->name;
+  g_imu.has_angle = b->has_angle;
+  g_imu.online = 1U;
+  return 0;
 }
 
-/**
- * @brief  逐字节组帧,失步时从下一个 0x55 重新同步
- */
-static void jy901s_parse_byte(uint8_t byte)
+int Imu_Update(void)
 {
-    if (s_frame_idx == 0U) {
-        if (byte != JY901S_FRAME_HEAD) {
-            return;
-        }
-        s_frame[s_frame_idx++] = byte;
-    } else if (s_frame_idx == 1U) {
-        /* 只解析加速度/角速度/角度包 */
-        if (byte != JY901S_PKT_ACC && byte != JY901S_PKT_GYRO &&
-            byte != JY901S_PKT_ANGLE) {
-            s_frame_idx = 0U;
-            return;
-        }
-        s_frame[s_frame_idx++] = byte;
-    } else {
-        s_frame[s_frame_idx++] = byte;
-        if (s_frame_idx < JY901S_FRAME_LEN) {
-            return;
-        }
+  imu_sample_t s;
+  uint8_t i;
 
-        /* 整帧收齐,校验:前 10 字节之和低 8 位 */
-        s_frame_idx = 0U;
-        uint8_t sum = 0U;
-        for (uint8_t i = 0; i < JY901S_FRAME_LEN - 1U; i++) {
-            sum += s_frame[i];
-        }
-        if (sum == s_frame[JY901S_FRAME_LEN - 1U]) {
-            jy901s_apply_frame();
-        } else {
-            g_imu.err_cnt++;
-        }
+  if (s_active == NULL) {
+    return -1;
+  }
+
+  /* 器件需要判断数据就绪时,先等就绪标志 */
+  if (s_active->wait_ready != NULL) {
+    if (s_active->wait_ready(IMU_I2C_TIMEOUT_MS) != 0) {
+      g_imu.err_cnt++;
+      return -1;
     }
+  }
+
+  if (s_active->read(&s) != 0) {
+    g_imu.err_cnt++;
+    return -1;
+  }
+
+  for (i = 0U; i < 3U; i++) {
+    g_imu.gyro_raw[i] = s.gyro_raw[i];
+    /* 原始角速度换算成 °/s 后扣掉零偏 */
+    g_imu.gyro_dps[i] =
+        ((float)s.gyro_raw[i] * s_active->gyro_lsb_dps) - g_imu.gyro_bias_dps[i];
+
+    g_imu.accel_raw[i] = s.accel_raw[i];
+    g_imu.accel_g[i] = (float)s.accel_raw[i] * s_active->accel_lsb_g;
+  }
+
+  /* 只有器件自带姿态解算时才更新角度 */
+  if (s_active->has_angle != 0U) {
+    g_imu.roll_deg = (float)s.angle_raw[0] * s_active->angle_lsb_deg;
+    g_imu.pitch_deg = (float)s.angle_raw[1] * s_active->angle_lsb_deg;
+    g_imu.yaw_deg = (float)s.angle_raw[2] * s_active->angle_lsb_deg;
+  }
+
+  g_imu.temp_c = ((float)s.temp_raw * s_active->temp_lsb_c) + s_active->temp_offset_c;
+
+  return 0;
 }
 
-/**
- * @brief  串口接收完成回调(中断上下文),解析并重新挂起接收
- */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+uint8_t Imu_IsOnline(void)
 {
-    if (huart->Instance == USART1) {
-        jy901s_parse_byte(s_rx_byte);
-        HAL_UART_Receive_IT(&huart1, &s_rx_byte, 1U);
-    }
+  return g_imu.online;
 }
 
-/**
- * @brief  imu 任务:启动接收后周期检查在线状态
- */
+const char *Imu_SourceName(void)
+{
+  return (s_active != NULL) ? s_active->name : "none";
+}
+
 void imu_task(void *argument)
 {
-    (void)argument;
+  (void)argument;
 
-    imu_init();
-
-    for (;;) {
-        /* 接收因溢出/帧错误被 HAL 中止时,重新挂起 */
-        if (huart1.RxState == HAL_UART_STATE_READY) {
-            g_imu.err_cnt++;
-            imu_init();
-        }
-
-        /* 帧流超时判离线 */
-        if (g_imu.online != 0U &&
-            (HAL_GetTick() - s_last_frame_tick) > IMU_FRAME_TIMEOUT_MS) {
-            g_imu.online = 0U;
-            g_imu.err_cnt++;
-        }
-
-        osDelay(IMU_TASK_PERIOD_MS);
+  for (;;) {
+    /* ---------------- 选器件并初始化,失败则周期性重试 ---------------- */
+    if (Imu_Init() != 0) {
+      g_imu.online = 0U;
+      /* I2C 一旦卡在 BUSY 就不会自愈,每次重试前先复位总线 */
+      Imu_RecoverBus();
+      /* 第一次失败时扫一遍总线,把结果留在 g_imu_diag 里,方便在调试器里直接看 */
+      if (s_scan_done == 0U) {
+        (void)Imu_ScanBus();
+        s_scan_done = 1U;
+      }
+      osDelay(IMU_RETRY_DELAY_MS);
+      continue;
     }
+    s_scan_done = 0U; /* 成功了,下次再失败就重新扫 */
+
+    /* ---------------- 需要时做上电零偏标定(此刻模块必须静止) ---------------- */
+    if (s_active->need_gyro_calib != 0U) {
+      (void)imu_calibrate_gyro(IMU_CALIB_SAMPLES);
+    }
+
+    /* ---------------- 周期采集 ---------------- */
+    for (;;) {
+      if (Imu_Update() != 0) {
+        g_imu.online = 0U; /* 读不到数据,回去重新选器件/初始化 */
+        break;
+      }
+      osDelay(IMU_TASK_PERIOD_MS);
+    }
+
+    osDelay(IMU_RETRY_DELAY_MS);
+  }
 }
