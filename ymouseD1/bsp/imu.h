@@ -4,30 +4,16 @@
 #include <stdint.h>
 
 /* ==========================================================================
- * 姿态传感器统一接口(适配层)
+ * 姿态传感器接口
  *
- * 本项目支持两种陀螺仪/姿态模块,硬件上二选一,不会同时使用:
- *   - LSM6DSV16XTR    六轴 IMU,      IIC1 地址 0x6A(SA0=0) / 0x6B(SA0=1)
- *   - 维特智能 JY901S  九轴姿态模块,  IIC1 地址 0x50
+ * 硬件:LSM6DSV16XTR 六轴 IMU,挂在 IIC1(PB6=SCL / PB7=SDA),
+ *       地址 0x6A(SA0=0) / 0x6B(SA0=1),上电自动探测。
  *
- * 应用层只包含本文件:读 g_imu,或调用 Imu_* 接口,不需要知道挂的是哪一颗。
- * 换器件时不用改应用代码,只需要:
- *   - 保持 IMU_SENSOR_SEL = IMU_SENSOR_AUTO,上电自动探测哪颗在;或者
- *   - 直接指定 IMU_SENSOR_LSM6DSV16XTR / IMU_SENSOR_JY901S。
- *
- * 具体器件寄存器在 imu_lsm6dsv16x.c / imu_jy901s.c 里,本文件不碰硬件。
+ * 应用层只包含本文件:读 g_imu,或调用 Imu_* 接口。
+ * 具体器件寄存器在 imu_lsm6dsv16x.c 里,本文件不碰硬件。
  * ========================================================================== */
 
-/* ---------------- 器件选择 ---------------- */
-#define IMU_SENSOR_AUTO          0U /* 上电自动探测 */
-#define IMU_SENSOR_LSM6DSV16XTR  1U
-#define IMU_SENSOR_JY901S        2U
-
-#ifndef IMU_SENSOR_SEL
-#define IMU_SENSOR_SEL  IMU_SENSOR_JY901S
-#endif
-
-/* ---------------- 运行参数(两个器件共用) ---------------- */
+/* ---------------- 运行参数 ---------------- */
 #define IMU_I2C_TIMEOUT_MS   50U  /* 单次 I2C 传输超时 */
 #define IMU_TASK_PERIOD_MS   10U  /* 采集周期 10ms => 100Hz */
 #define IMU_RETRY_DELAY_MS   500U /* 初始化失败后的重试间隔 */
@@ -59,7 +45,7 @@ typedef struct {
   float gyro_lsb_dps;      /* °/s / LSB */
   float angle_lsb_deg;     /* °   / LSB */
   float temp_lsb_c;        /* ℃   / LSB */
-  float temp_offset_c;     /* 温度换算的固定偏置(LSM6DSV16XTR 为 25℃,JY901S 为 0) */
+  float temp_offset_c;     /* 温度换算的固定偏置(LSM6DSV16XTR 为 25℃) */
 
   /** 探测并初始化器件,0 成功;器件不在时返回 -1 */
   int (*init)(void);
@@ -69,9 +55,8 @@ typedef struct {
   int (*read)(imu_sample_t *s);
 } imu_backend_t;
 
-/* 两个后端实例 */
+/* 后端实例 */
 extern const imu_backend_t imu_backend_lsm6dsv16x;
-extern const imu_backend_t imu_backend_jy901s;
 
 /* ==========================================================================
  * 统一数据与接口
@@ -89,9 +74,13 @@ typedef struct {
   int16_t accel_raw[3];    /* 加速度原始值 */
   float accel_g[3];        /* 加速度,g */
 
-  float roll_deg;          /* 姿态角:器件自带解算时才有效 */
-  float pitch_deg;
-  float yaw_deg;
+  /* ---- 角度,单位:度(°) ---- */
+  float roll_deg;          /* 横滚角。器件自带解算时直接取器件的值;        */
+  float pitch_deg;         /* 俯仰角。否则由角速度按真实时间积分得到,     */
+  float yaw_deg;           /* 航向角。以调用 Imu_Init() 那一刻为零位,     */
+                           /*         已折算到 (-180, 180]。              */
+                           /* 注意:纯陀螺积分没有绝对参考,会缓慢漂移;     */
+                           /*       需要长时间稳定的话得再用加速度计做融合。*/
 
   float temp_c;            /* 器件温度,℃ */
 } imu_data_t;
@@ -140,8 +129,8 @@ uint8_t Imu_ScanBus(void);
 void Imu_RecoverBus(void);
 
 /**
- * @brief  按 IMU_SENSOR_SEL 选择并初始化器件(AUTO 时自动探测)
- * @retval 0 成功, -1 未找到可用器件
+ * @brief  初始化 IMU(LSM6DSV16XTR):探测 -> 软复位 -> 配陀螺仪/加速度计
+ * @retval 0 成功, -1 未找到器件
  */
 int Imu_Init(void);
 

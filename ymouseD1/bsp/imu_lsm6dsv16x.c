@@ -215,33 +215,35 @@ static int lsm6_wait_ready(uint32_t timeout_ms)
 }
 
 /**
- * @brief 后端 read:0x22 起连读 12 字节(陀螺仪 X/Y/Z + 加速度计 X/Y/Z),再读温度
+ * @brief 后端 read:从 0x20 起一次连读 14 字节
+ *        (温度 2 + 陀螺仪 6 + 加速度计 6),原来分成 12+2 两次读
+ * @note  0x20~0x2D 是连续地址,合成一次传输可省掉一整个
+ *        "START+地址+寄存器号" 的开销,约省 1/4 的 I2C 时间
  */
 static int lsm6_read(imu_sample_t *s)
 {
-  uint8_t buf[12];
-  uint8_t t[2];
+  uint8_t buf[LSM6DSV16X_OUT_BLOCK_LEN];
   uint8_t i;
 
   if (s == NULL) {
     return -1;
   }
 
-  if (lsm6_read_regs(LSM6DSV16X_OUTX_L_G, buf, 12U) != 0) {
+  if (lsm6_read_regs(LSM6DSV16X_OUT_TEMP_L, buf, LSM6DSV16X_OUT_BLOCK_LEN) != 0) {
     return -1;
-  }
-  for (i = 0U; i < 3U; i++) {
-    /* 小端:先低字节 */
-    s->gyro_raw[i] = (int16_t)(((uint16_t)buf[2U * i + 1U] << 8) | (uint16_t)buf[2U * i]);
-    s->accel_raw[i] =
-        (int16_t)(((uint16_t)buf[2U * (i + 3U) + 1U] << 8) | (uint16_t)buf[2U * (i + 3U)]);
-    s->angle_raw[i] = 0; /* 本器件不直接输出姿态角 */
   }
 
-  if (lsm6_read_regs(LSM6DSV16X_OUT_TEMP_L, t, 2U) != 0) {
-    return -1;
+  /* buf[0..1] 温度 */
+  s->temp_raw = (int16_t)(((uint16_t)buf[1] << 8) | (uint16_t)buf[0]);
+
+  /* buf[2..7] 陀螺仪 X/Y/Z,buf[8..13] 加速度计 X/Y/Z,都是小端 */
+  for (i = 0U; i < 3U; i++) {
+    s->gyro_raw[i] =
+        (int16_t)(((uint16_t)buf[2U * i + 3U] << 8) | (uint16_t)buf[2U * i + 2U]);
+    s->accel_raw[i] =
+        (int16_t)(((uint16_t)buf[2U * i + 9U] << 8) | (uint16_t)buf[2U * i + 8U]);
+    s->angle_raw[i] = 0; /* 本器件不直接输出姿态角 */
   }
-  s->temp_raw = (int16_t)(((uint16_t)t[1] << 8) | (uint16_t)t[0]);
 
   return 0;
 }

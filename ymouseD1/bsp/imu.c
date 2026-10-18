@@ -1,14 +1,12 @@
 /**
   ******************************************************************************
   * @file    imu.c
-  * @brief   姿态传感器适配层
+  * @brief   姿态传感器:LSM6DSV16XTR 的采集与换算
   *
-  *          硬件上两种陀螺仪二选一(不会同时使用):
-  *            - LSM6DSV16XTR   IIC1 0x6A / 0x6B   (bsp/imu_lsm6dsv16x.c)
-  *            - 维特智能 JY901S IIC1 0x50          (bsp/imu_jy901s.c)
+  *          硬件:IIC1 0x6A / 0x6B(SA0 决定),驱动在 bsp/imu_lsm6dsv16x.c
   *
-  *          本文件负责:选器件、把原始值换算成工程单位、跑采集任务。
-  *          应用层只读 g_imu,换器件不用改应用代码。
+  *          本文件负责:初始化、把原始值换算成工程单位、跑采集任务。
+  *          应用层只读 g_imu。
   ******************************************************************************
   */
 
@@ -21,7 +19,6 @@
 #include "cmsis_os2.h"
 
 #include "imu_lsm6dsv16x.h"
-#include "imu_jy901s.h"
 
 /* 统一数据,供其它任务读取 */
 imu_data_t g_imu;
@@ -35,9 +32,41 @@ static const imu_backend_t *s_active = NULL;
 /* 本次启动是否已做过总线扫描(避免一直失败时反复扫总线) */
 static uint8_t s_scan_done = 0U;
 
+/* 陀螺仪积分出来的角度(度),以初始化时刻为零位 */
+static float s_angle_deg[3];
+/* 上一次积分的时间戳(ms),用来算真实采样间隔 */
+static uint32_t s_last_tick = 0U;
+
 /* ==========================================================================
  * 内部函数
  * ========================================================================== */
+
+/**
+ * @brief 把角度折算到 (-180, 180]
+ * @note  积分是连续累加的,不折算的话航向角会一直长到几千度
+ */
+static float imu_wrap_deg(float deg)
+{
+  while (deg > 180.0f) {
+    deg -= 360.0f;
+  }
+  while (deg <= -180.0f) {
+    deg += 360.0f;
+  }
+  return deg;
+}
+
+/**
+ * @brief 保留两位小数(0.01° 分辨率)
+ * @note  用整数转换代替 roundf():M4F 上一次 vcvt 就够,
+ *        roundf() 在 newlib-nano 里是库函数调用,每帧三次不划算
+ */
+static float imu_round2(float v)
+{
+  float bias = (v >= 0.0f) ? 0.5f : -0.5f;
+
+  return (float)((int32_t)(v * 100.0f + bias)) * 0.01f;
+}
 
 static void imu_clear_data(void)
 {
@@ -54,6 +83,12 @@ static void imu_clear_data(void)
   g_imu.pitch_deg = 0.0f;
   g_imu.yaw_deg = 0.0f;
   g_imu.temp_c = 0.0f;
+
+  /* 积分状态一起清零,初始化后从 0° 开始 */
+  for (i = 0U; i < 3U; i++) {
+    s_angle_deg[i] = 0.0f;
+  }
+  s_last_tick = HAL_GetTick();
 }
 
 /**
@@ -104,6 +139,44 @@ static int imu_calibrate_gyro(uint16_t samples)
  * 对外接口
  * ========================================================================== */
 
+/**
+ * @brief 更新姿态角(单位:度)
+ *
+ * 器件自带姿态解算就直接取它的;否则把角速度(°/s)按真实时间积分成角度(°)。
+ * 对外发布的值统一保留两位小数,而积分状态 s_angle_deg[] 保持全精度 ——
+ * 每帧都截断的话误差会越积越大。
+ */
+static void imu_update_angles(const imu_sample_t *s)
+{
+  uint8_t i;
+
+  if (s_active->has_angle != 0U) {
+    g_imu.roll_deg = (float)s->angle_raw[0] * s_active->angle_lsb_deg;
+    g_imu.pitch_deg = (float)s->angle_raw[1] * s_active->angle_lsb_deg;
+    g_imu.yaw_deg = (float)s->angle_raw[2] * s_active->angle_lsb_deg;
+  } else {
+    uint32_t now = HAL_GetTick();
+    float dt = (float)(now - s_last_tick) / 1000.0f;
+
+    s_last_tick = now;
+
+    /* 只接受合理的采样间隔:调试器停住时 dt 会很大,那一段直接丢掉,免得角度跳变 */
+    if ((dt > 0.0f) && (dt < 0.5f)) {
+      for (i = 0U; i < 3U; i++) {
+        s_angle_deg[i] += g_imu.gyro_dps[i] * dt;
+      }
+      g_imu.roll_deg = imu_wrap_deg(s_angle_deg[0]);
+      g_imu.pitch_deg = imu_wrap_deg(s_angle_deg[1]);
+      g_imu.yaw_deg = imu_wrap_deg(s_angle_deg[2]);
+    }
+  }
+
+  /* 对外保留两位小数(0.01° 分辨率) */
+  g_imu.roll_deg = imu_round2(g_imu.roll_deg);
+  g_imu.pitch_deg = imu_round2(g_imu.pitch_deg);
+  g_imu.yaw_deg = imu_round2(g_imu.yaw_deg);
+}
+
 void Imu_RecoverBus(void)
 {
   /* HAL 的 I2C 卡住后不会自愈,必须整个复位重来 */
@@ -133,39 +206,14 @@ uint8_t Imu_ScanBus(void)
 
 int Imu_Init(void)
 {
-  const imu_backend_t *b = NULL;
+  const imu_backend_t *b = &imu_backend_lsm6dsv16x;
 
   s_active = NULL;
   g_imu.online = 0U;
   g_imu.source = NULL;
   g_imu.has_angle = 0U;
 
-#if (IMU_SENSOR_SEL == IMU_SENSOR_LSM6DSV16XTR)
-  if (imu_backend_lsm6dsv16x.init() == 0) {
-    b = &imu_backend_lsm6dsv16x;
-  }
-#elif (IMU_SENSOR_SEL == IMU_SENSOR_JY901S)
-  if (imu_backend_jy901s.init() == 0) {
-    b = &imu_backend_jy901s;
-  }
-#else /* IMU_SENSOR_AUTO:按顺序探测,谁先应答就用谁 */
-  {
-    static const imu_backend_t *const cand[2] = {
-      &imu_backend_lsm6dsv16x,
-      &imu_backend_jy901s,
-    };
-    uint8_t i;
-
-    for (i = 0U; i < 2U; i++) {
-      if (cand[i]->init() == 0) {
-        b = cand[i];
-        break;
-      }
-    }
-  }
-#endif
-
-  if (b == NULL) {
+  if (b->init() != 0) {
     return -1;
   }
 
@@ -173,7 +221,8 @@ int Imu_Init(void)
   imu_clear_data();
   g_imu.err_cnt = 0U;
   g_imu.source = b->name;
-  g_imu.has_angle = b->has_angle;
+  /* 角度总是有的:器件自带解算就直接用,否则由角速度积分得到 */
+  g_imu.has_angle = 1U;
   g_imu.online = 1U;
   return 0;
 }
@@ -210,12 +259,7 @@ int Imu_Update(void)
     g_imu.accel_g[i] = (float)s.accel_raw[i] * s_active->accel_lsb_g;
   }
 
-  /* 只有器件自带姿态解算时才更新角度 */
-  if (s_active->has_angle != 0U) {
-    g_imu.roll_deg = (float)s.angle_raw[0] * s_active->angle_lsb_deg;
-    g_imu.pitch_deg = (float)s.angle_raw[1] * s_active->angle_lsb_deg;
-    g_imu.yaw_deg = (float)s.angle_raw[2] * s_active->angle_lsb_deg;
-  }
+  imu_update_angles(&s);
 
   g_imu.temp_c = ((float)s.temp_raw * s_active->temp_lsb_c) + s_active->temp_offset_c;
 

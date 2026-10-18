@@ -21,7 +21,9 @@
 #define LSM6DSV16X_CTRL8           0x17U /* 加速度计 量程 + LPF2 带宽 */
 #define LSM6DSV16X_STATUS_REG      0x1EU /* 数据就绪标志 */
 #define LSM6DSV16X_OUT_TEMP_L      0x20U /* 温度,2 字节小端 */
-#define LSM6DSV16X_OUTX_L_G        0x22U /* 陀螺仪 X 低字节,连续 12 字节 = 陀螺仪 X/Y/Z + 加速度计 X/Y/Z */
+#define LSM6DSV16X_OUTX_L_G        0x22U /* 陀螺仪 X 低字节 */
+/* 0x20~0x2D 是连续的:温度(2) + 陀螺仪(6) + 加速度计(6),一次读完最省总线时间 */
+#define LSM6DSV16X_OUT_BLOCK_LEN   14U
 
 #define LSM6DSV16X_WHOAMI_ID       0x70U /* LSM6DSV16X / LSM6DSV16XTR 的 ID */
 

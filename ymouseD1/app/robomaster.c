@@ -4,6 +4,8 @@
 #include "dart_motor.h"
 
 void master_task(void *argument) {
+  (void)argument;
+
   /* USER CODE BEGIN 5 */
     dart_init(); //镖体初始化
   /* Infinite loop */

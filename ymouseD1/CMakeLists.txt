@@ -57,7 +57,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     app/dart_motor.c
     bsp/imu.c
     bsp/imu_lsm6dsv16x.c
-    bsp/imu_jy901s.c
     bsp/servo_motor.c
 )
 
