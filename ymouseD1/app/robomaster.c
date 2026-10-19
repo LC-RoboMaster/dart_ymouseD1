@@ -1,7 +1,8 @@
 #include "cmsis_os2.h"
 #include "main.h"
 #include "servo_motor.h"
-#include "dart_motor.h"
+#include "dart.h"
+#include "imu.h"
 
 void master_task(void *argument) {
   (void)argument;
@@ -12,9 +13,9 @@ void master_task(void *argument) {
   for (;;) {
 
 
-    dart_motor_task();
+    dart_task();
     osDelay(1);
-
   }
   /* USER CODE END 5 */
 }
+

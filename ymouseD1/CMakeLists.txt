@@ -54,7 +54,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     app/robomaster.c
     app/message.c
-    app/dart_motor.c
+        app/dart.c
     bsp/imu.c
     bsp/imu_lsm6dsv16x.c
     bsp/servo_motor.c

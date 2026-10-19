@@ -1,6 +1,6 @@
 /**
   ******************************************************************************
-  * @file    dart_motor.c
+  * @file    dart.c
   * @brief   飞镖机构的 4 路舵机
   *
   *          4 路舵机都挂在 TIM3 的 CH1~CH4 上:
@@ -11,7 +11,7 @@
   ******************************************************************************
   */
 
-#include "dart_motor.h"
+#include "dart.h"
 
 #include "servo_motor.h"
 #include "tim.h"
@@ -20,9 +20,13 @@
 
 /* 4 路舵机的参数表:改参数只动这张表 */
 static servo_motor_t s_servo[DART_SERVO_COUNT] = {
-  { .htim = &htim3, .channel = TIM_CHANNEL_1,
-    .min_angle = 0U, .max_angle = 180U,
-    .min_pulse_us = 500U, .max_pulse_us = 2500U },
+  { .htim = &htim3,
+    .channel = TIM_CHANNEL_1,
+    .min_angle = 0U,
+    .max_angle = 180U,
+    .min_pulse_us = 500U,
+    .max_pulse_us = 2500U,
+  },
   { .htim = &htim3, .channel = TIM_CHANNEL_2,
     .min_angle = 0U, .max_angle = 180U,
     .min_pulse_us = 500U, .max_pulse_us = 2500U },
@@ -37,34 +41,39 @@ static servo_motor_t s_servo[DART_SERVO_COUNT] = {
 void dart_init(void)
 {
   uint8_t i;
-
-  for (i = 0U; i < DART_SERVO_COUNT; i++) {
-    (void)ServoMotor_Init(&s_servo[i]);
+  for (i = 0; i < DART_SERVO_COUNT; i++) {
+    ServoMotor_Init(&s_servo[i]);
+    ServoMotor_SetPosition(&s_servo[i], 90);
   }
-}
 
-void dart_motor_task(void)
-{
-  /* TODO: dart_control() 还没实现
-   *
-   * 这里必须立即返回。本函数由最高优先级的 master_task 的循环驱动,
-   * 一旦在里面写死循环,imu / message / defaultTask 会全部被饿死
-   * (曾踩过:那里写了个 for(;;) 空循环,导致 IMU 永远读不到数据、
-   * 看门狗也没被启动)。*/
 }
 
 void dart_stop(void)
 {
-  ServoMotor_SetPosition(&s_servo[0], 5);
+  ServoMotor_SetPosition(&s_servo[0], 0);
   ServoMotor_SetPosition(&s_servo[1], 0);
   ServoMotor_SetPosition(&s_servo[2], 0);
   ServoMotor_SetPosition(&s_servo[3], 0);
 }
 
-void servo_motor_angleset(int angle1, int angle2, int angle3, int angle4)
+void servo_motor_angleset(int angle0, int angle1, int angle2, int angle3)
 {
-  ServoMotor_SetPosition(&s_servo[0], angle1);
-  ServoMotor_SetPosition(&s_servo[1], angle2);
-  ServoMotor_SetPosition(&s_servo[2], angle3);
-  ServoMotor_SetPosition(&s_servo[3], angle4);
+  uint8_t i ;
+  int angle[] = {angle0, angle1, angle2, angle3};
+
+for (i = 0; i < DART_SERVO_COUNT; i++)
+{
+  ServoMotor_SetPosition(&s_servo[i], angle[i]);
+}
+}
+
+void dart_control(void)
+{
+  servo_motor_angleset(90, 90, 0, 0);
+}
+
+void dart_task(void)
+{
+  dart_init();
+  dart_control();
 }

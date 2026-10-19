@@ -252,7 +252,6 @@ const imu_backend_t imu_backend_lsm6dsv16x = {
   .name = "LSM6DSV16XTR",
   .addr_7bit = 0x6AU,
   .has_angle = 0U,          /* 只有原始角速度/加速度,姿态角需自己解算 */
-  .need_gyro_calib = 1U,    /* 上电需要做零偏标定 */
   .accel_lsb_g = (IMU_XL_MG_PER_LSB / 1000.0f),
   .gyro_lsb_dps = (IMU_GY_MDPS_PER_LSB / 1000.0f),
   .angle_lsb_deg = 0.0f,

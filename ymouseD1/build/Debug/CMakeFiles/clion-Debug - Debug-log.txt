@@ -4,6 +4,6 @@ Preset CMake variables:
   CMAKE_TOOLCHAIN_FILE:FILEPATH="E:/1code/ymouseD1/ymouseD1/cmake/gcc-arm-none-eabi.cmake"
 
 Build type: Debug
--- Configuring done (0.1s)
+-- Configuring done (1.0s)
 -- Generating done (0.0s)
 -- Build files have been written to: E:/1code/ymouseD1/ymouseD1/build/Debug

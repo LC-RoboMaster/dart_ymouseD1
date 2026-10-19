@@ -83,11 +83,10 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* i2cHandle)
   /* USER CODE BEGIN I2C1_MspInit 1 */
 
   /* 上拉已在上面由 CubeMX 生成(GPIO_InitStruct.Pull = GPIO_PULLUP)。
-   * I2C 是开漏输出,SCL/SDA 必须有上拉,否则两根线悬空,I2C 外设会一直
-   * 认为总线忙、每次传输直接返回 HAL_BUSY(现象:g_imu_diag 里
-   * last_status == 2、fail_cnt 一直涨、总线扫描一个器件都扫不到)。
-   * 内部上拉只有约 40k,偏弱;长线或高速下仍建议在 SCL/SDA 到 3.3V
-   * 之间各加 4.7k 外部上拉。 */
+   * I2C 是开漏输出,SCL/SDA 必须有上拉:没上拉时两根线悬空,I2C 外设会
+   * 一直认为总线忙,每次传输直接返回 HAL_BUSY,一个器件都读不到。
+   * 内部上拉只有约 40k,偏弱;线长或想跑 400kHz 时,建议在 SCL/SDA
+   * 到 3.3V 之间各加 4.7k 外部上拉。 */
   /* USER CODE END I2C1_MspInit 1 */
   }
 }

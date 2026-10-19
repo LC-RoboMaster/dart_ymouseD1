@@ -1,5 +1,5 @@
-#ifndef YMOUSED1_DART_MOTOR_H
-#define YMOUSED1_DART_MOTOR_H
+#ifndef YMOUSED1_DART_H
+#define YMOUSED1_DART_H
 
 /* 4 路舵机(飞镖机构)的控制接口 */
 
@@ -11,7 +11,7 @@ void dart_init(void);
  * @note  必须先调用 dart_init();且本函数必须立即返回 ——
  *        master 是最高优先级任务,它不返回会把其它任务饿死
  */
-void dart_motor_task(void);
+void dart_task(void);
 
 /** @brief 全部回到初始位置:舵机1 到 5°,其余到 0° */
 void dart_stop(void);
