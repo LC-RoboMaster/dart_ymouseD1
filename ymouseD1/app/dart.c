@@ -69,7 +69,7 @@ for (i = 0; i < DART_SERVO_COUNT; i++)
 
 void dart_control(void)
 {
-  servo_motor_angleset(90, 90, 0, 0);
+  servo_motor_angleset(90, 90, 90, 90);
 }
 
 void dart_task(void)
